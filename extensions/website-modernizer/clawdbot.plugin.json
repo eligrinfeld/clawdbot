@@ -1,0 +1,63 @@
+{
+  "id": "website-modernizer",
+  "name": "Website Modernizer",
+  "description": "Autonomous AI agent pipeline: discover outdated websites, build modern replacements, and sell them for $200.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "dataDir": {
+        "type": "string",
+        "description": "Directory for SQLite database and generated sites"
+      },
+      "anthropicApiKey": {
+        "type": "string",
+        "description": "Anthropic API key for LLM calls"
+      },
+      "stripeSecretKey": {
+        "type": "string",
+        "description": "Stripe secret key for payment links"
+      },
+      "sendgridApiKey": {
+        "type": "string",
+        "description": "SendGrid API key for outreach emails"
+      },
+      "fromEmail": {
+        "type": "string",
+        "description": "Sender email address for outreach"
+      },
+      "fromName": {
+        "type": "string",
+        "description": "Sender display name for outreach"
+      },
+      "hostingProvider": {
+        "type": "string",
+        "description": "Hosting provider: vercel or netlify"
+      },
+      "hostingToken": {
+        "type": "string",
+        "description": "API token for hosting provider"
+      },
+      "maxConcurrentBuilds": {
+        "type": "number",
+        "description": "Maximum concurrent site builds (default: 3)"
+      },
+      "maxRegenAttempts": {
+        "type": "number",
+        "description": "Maximum regeneration attempts per site (default: 3)"
+      },
+      "minLighthouseScore": {
+        "type": "number",
+        "description": "Minimum Lighthouse score to pass QA (default: 85)"
+      },
+      "dailyEmailLimit": {
+        "type": "number",
+        "description": "Maximum emails per day (default: 100)"
+      },
+      "priceUsd": {
+        "type": "number",
+        "description": "Price per site in USD (default: 200)"
+      }
+    }
+  }
+}

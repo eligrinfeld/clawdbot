@@ -1,0 +1,17 @@
+{
+  "name": "@clawdbot/website-modernizer",
+  "version": "2026.1.24",
+  "type": "module",
+  "description": "Autonomous AI agent system that discovers outdated websites, builds modern replacements, and sells them",
+  "clawdbot": {
+    "extensions": ["./index.ts"]
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "clawdbot": "workspace:*",
+    "@types/better-sqlite3": "^7.6.12"
+  }
+}
