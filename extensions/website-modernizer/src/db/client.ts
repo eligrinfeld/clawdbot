@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { SCHEMA_SQL } from "./schema.js";
+import { safeJsonParse } from "../security.js";
 import type {
   Analysis,
   BusinessInfo,
@@ -189,6 +190,26 @@ export class ModernizerDb {
     this.db.prepare("INSERT OR IGNORE INTO suppression_list (email, reason) VALUES (?, ?)").run(email, reason);
   }
 
+  /** Count outreach emails sent to a specific domain since a given date. */
+  countEmailsToDomainSince(domain: string, sinceDate: string): number {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) as cnt FROM outreach o
+      JOIN leads l ON o.lead_id = l.id
+      WHERE l.domain = ? AND o.sent_at >= ?
+    `).get(domain, sinceDate) as { cnt: number };
+    return row.cnt;
+  }
+
+  /** Get total LLM/API cost for the current calendar month. */
+  getMonthlyTotalCost(): number {
+    const row = this.db.prepare(`
+      SELECT COALESCE(SUM(cost_usd), 0) as total
+      FROM pipeline_metrics
+      WHERE recorded_at >= date('now', 'start of month')
+    `).get() as { total: number };
+    return row.total;
+  }
+
   // ── Sales ──
 
   insertSale(leadId: number, amount: number): Sale {
@@ -237,18 +258,18 @@ export class ModernizerDb {
     return {
       id: r.id as number,
       leadId: r.lead_id as number,
-      lighthouseScores: r.lighthouse_scores ? JSON.parse(r.lighthouse_scores as string) : { performance: 0, accessibility: 0, bestPractices: 0, seo: 0 },
+      lighthouseScores: safeJsonParse(r.lighthouse_scores as string, { performance: 0, accessibility: 0, bestPractices: 0, seo: 0 }),
       mobileResponsive: !!(r.mobile_responsive as number),
       designEra: r.design_era as string | null,
       contentSummary: r.content_summary as string | null,
-      businessInfo: r.business_info ? JSON.parse(r.business_info as string) : null,
+      businessInfo: safeJsonParse(r.business_info as string, null),
       improvementPotential: r.improvement_potential as number,
       conversionLikelihood: r.conversion_likelihood as ConversionLikelihood,
       effortRequired: r.effort_required as EffortEstimate,
       decision: r.decision as AnalysisDecision,
       decisionReason: r.decision_reason as string | null,
-      keyImprovements: r.key_improvements ? JSON.parse(r.key_improvements as string) : [],
-      riskFactors: r.risk_factors ? JSON.parse(r.risk_factors as string) : [],
+      keyImprovements: safeJsonParse(r.key_improvements as string, []),
+      riskFactors: safeJsonParse(r.risk_factors as string, []),
       screenshotPath: r.screenshot_path as string | null,
       analyzedAt: r.analyzed_at as string,
     };
@@ -260,8 +281,8 @@ export class ModernizerDb {
       leadId: r.lead_id as number,
       html: r.html as string,
       previewUrl: r.preview_url as string | null,
-      designSystem: r.design_system ? JSON.parse(r.design_system as string) : null,
-      lighthouseScores: r.lighthouse_scores ? JSON.parse(r.lighthouse_scores as string) : null,
+      designSystem: safeJsonParse(r.design_system as string, null),
+      lighthouseScores: safeJsonParse(r.lighthouse_scores as string, null),
       regenerationCount: r.regeneration_count as number,
       qaPassed: !!(r.qa_passed as number),
       generatedAt: r.generated_at as string,

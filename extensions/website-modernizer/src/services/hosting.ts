@@ -4,6 +4,7 @@
  */
 
 import type { ModernizerConfig } from "../types.js";
+import { sanitizeErrorMessage } from "../security.js";
 
 export interface DeployResult {
   success: boolean;
@@ -55,7 +56,7 @@ async function deployToNetlify(token: string, html: string, siteName: string): P
     });
 
     if (!siteRes.ok) {
-      return { success: false, error: `Netlify site creation failed: ${await siteRes.text()}` };
+      return { success: false, error: `Netlify site creation failed: ${sanitizeErrorMessage(await siteRes.text())}` };
     }
 
     const site = (await siteRes.json()) as { id: string; url: string; ssl_url: string };
@@ -74,7 +75,7 @@ async function deployToNetlify(token: string, html: string, siteName: string): P
     });
 
     if (!deployRes.ok) {
-      return { success: false, error: `Netlify deploy failed: ${await deployRes.text()}` };
+      return { success: false, error: `Netlify deploy failed: ${sanitizeErrorMessage(await deployRes.text())}` };
     }
 
     const deploy = (await deployRes.json()) as { id: string; ssl_url: string; url: string };
@@ -117,7 +118,7 @@ async function deployToVercel(token: string, html: string, siteName: string): Pr
     });
 
     if (!deployRes.ok) {
-      return { success: false, error: `Vercel deploy failed: ${await deployRes.text()}` };
+      return { success: false, error: `Vercel deploy failed: ${sanitizeErrorMessage(await deployRes.text())}` };
     }
 
     const deploy = (await deployRes.json()) as { id: string; url: string };

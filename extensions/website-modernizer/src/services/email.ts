@@ -4,6 +4,7 @@
  */
 
 import type { ModernizerConfig } from "../types.js";
+import { escapeHtml, isStrictValidEmail, isValidUrl } from "../security.js";
 
 export interface SendEmailOptions {
   to: string;
@@ -76,22 +77,24 @@ export async function sendEmail(config: ModernizerConfig, opts: SendEmailOptions
   }
 }
 
-/** Validate email format (basic check). */
+/** Validate email format with strict checks (length, TLD, control chars). */
 export function isValidEmail(email: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  return isStrictValidEmail(email);
 }
 
-/** Convert plain text email to basic HTML with proper line breaks. */
+/** Convert plain text email to basic HTML with proper line breaks and safe link creation. */
 function plainTextToHtml(text: string): string {
-  const escaped = text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  const escaped = escapeHtml(text);
 
-  // Convert URLs to links
+  // Convert URLs to links with proper validation and escaping
   const withLinks = escaped.replace(
-    /(https?:\/\/[^\s<]+)/g,
-    '<a href="$1" style="color:#2563eb;">$1</a>',
+    /(https?:\/\/[^\s<&]+)/g,
+    (match) => {
+      // Only linkify valid http/https URLs
+      if (!isValidUrl(match)) return match;
+      const escapedUrl = match.replace(/"/g, "&quot;");
+      return `<a href="${escapedUrl}" style="color:#2563eb;">${match}</a>`;
+    },
   );
 
   // Convert line breaks

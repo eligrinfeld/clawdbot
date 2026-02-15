@@ -17,6 +17,7 @@ import {
   siteGenerationPrompt,
   siteRegenerationPrompt,
 } from "../templates/prompts.js";
+import { sanitizeGeneratedHtml } from "../security.js";
 
 export interface BuildResult {
   site: GeneratedSite;
@@ -82,13 +83,13 @@ export async function buildSite(
       if (attempt === 0) {
         // Initial generation
         const result = await generateSiteHtml(config, businessInfo, content.data, designSystem.data, lead);
-        html = result.html;
+        html = sanitizeGeneratedHtml(result.html);
         totalCost += result.cost;
       } else {
         // Regeneration with feedback
         regenCount++;
         const result = await regenerateSiteHtml(config, html, lighthouseResult.issues, []);
-        html = result.html;
+        html = sanitizeGeneratedHtml(result.html);
         totalCost += result.cost;
       }
 

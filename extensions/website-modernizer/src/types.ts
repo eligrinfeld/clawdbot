@@ -134,6 +134,10 @@ export interface ModernizerConfig {
   minLighthouseScore: number;
   dailyEmailLimit: number;
   priceUsd: number;
+  /** Max total LLM/API spend per calendar month (USD). Pipeline halts if exceeded. */
+  maxMonthlyCostUsd: number;
+  /** Max LLM/API spend per individual lead (USD). Lead is skipped if exceeded. */
+  maxPerLeadCostUsd: number;
 }
 
 export const DEFAULT_CONFIG: Omit<ModernizerConfig, "dataDir"> = {
@@ -142,6 +146,8 @@ export const DEFAULT_CONFIG: Omit<ModernizerConfig, "dataDir"> = {
   minLighthouseScore: 85,
   dailyEmailLimit: 100,
   priceUsd: 200,
+  maxMonthlyCostUsd: 500,
+  maxPerLeadCostUsd: 10,
 };
 
 /** Pipeline stage result with cost tracking. */

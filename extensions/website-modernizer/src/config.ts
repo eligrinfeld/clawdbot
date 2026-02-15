@@ -9,6 +9,13 @@ import type { ClawdbotPluginApi } from "../../../src/plugins/types.js";
 import type { ModernizerConfig } from "./types.js";
 import { DEFAULT_CONFIG } from "./types.js";
 
+function parseFloatEnv(name: string): number | undefined {
+  const val = process.env[name];
+  if (!val) return undefined;
+  const num = parseFloat(val);
+  return Number.isFinite(num) ? num : undefined;
+}
+
 export function resolveConfig(api: ClawdbotPluginApi): ModernizerConfig {
   const pluginCfg = (api.pluginConfig ?? {}) as Partial<ModernizerConfig>;
 
@@ -26,5 +33,7 @@ export function resolveConfig(api: ClawdbotPluginApi): ModernizerConfig {
     minLighthouseScore: pluginCfg.minLighthouseScore ?? DEFAULT_CONFIG.minLighthouseScore,
     dailyEmailLimit: pluginCfg.dailyEmailLimit ?? DEFAULT_CONFIG.dailyEmailLimit,
     priceUsd: pluginCfg.priceUsd ?? DEFAULT_CONFIG.priceUsd,
+    maxMonthlyCostUsd: pluginCfg.maxMonthlyCostUsd ?? parseFloatEnv("MODERNIZER_MAX_MONTHLY_COST") ?? DEFAULT_CONFIG.maxMonthlyCostUsd,
+    maxPerLeadCostUsd: pluginCfg.maxPerLeadCostUsd ?? parseFloatEnv("MODERNIZER_MAX_PER_LEAD_COST") ?? DEFAULT_CONFIG.maxPerLeadCostUsd,
   };
 }

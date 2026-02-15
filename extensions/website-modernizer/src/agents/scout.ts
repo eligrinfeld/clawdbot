@@ -8,6 +8,7 @@ import type { ModernizerDb } from "../db/client.js";
 import { callLlm, parseLlmJson } from "../services/llm.js";
 import { fetchWebpage } from "../services/screenshot.js";
 import { domainQualificationPrompt } from "../templates/prompts.js";
+import { isValidDomain, sanitizeHtmlForLlm } from "../security.js";
 
 export interface ScoutResult {
   discovered: number;
@@ -221,10 +222,13 @@ async function qualifyDomain(
   const copyrightMatch = html.match(/©\s*(\d{4})|copyright\s*(\d{4})/i);
   const copyrightYear = copyrightMatch?.[1] ?? copyrightMatch?.[2];
 
-  // Step 4: LLM qualification (use Haiku for cost efficiency)
+  // Step 4: Sanitize HTML before LLM processing (prevent prompt injection)
+  const cleanHtml = sanitizeHtmlForLlm(html);
+
+  // Step 5: LLM qualification (use Haiku for cost efficiency)
   const prompt = domainQualificationPrompt({
     domain,
-    htmlSnippet: html,
+    htmlSnippet: cleanHtml,
     copyrightYear,
   });
 
@@ -255,8 +259,8 @@ function cleanupDomain(input: string): string | null {
   domain = domain.split("/")[0];
   // Strip www prefix
   domain = domain.replace(/^www\./, "");
-  // Basic validation
-  if (!domain.includes(".") || domain.length < 4) return null;
+  // Validate domain format and reject internal/private/blocked targets
+  if (!isValidDomain(domain)) return null;
   return domain;
 }
 

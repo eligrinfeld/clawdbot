@@ -5,6 +5,8 @@
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { assertPublicHostname } from "../../../../src/infra/net/ssrf.js";
+import { isValidUrl } from "../security.js";
 
 export interface ScreenshotResult {
   path: string;
@@ -18,6 +20,13 @@ export interface ScreenshotResult {
  * Falls back to returning an empty result if Playwright is not installed.
  */
 export async function takeScreenshot(url: string, outputDir: string): Promise<ScreenshotResult | null> {
+  // Validate URL scheme and block internal targets
+  if (!isValidUrl(url, ["https:", "http:"])) {
+    throw new Error(`Invalid URL scheme for screenshot (only http/https allowed): ${url}`);
+  }
+  const urlObj = new URL(url);
+  await assertPublicHostname(urlObj.hostname);
+
   mkdirSync(outputDir, { recursive: true });
   const filename = `screenshot-${Date.now()}.png`;
   const outputPath = join(outputDir, filename);
@@ -112,6 +121,14 @@ export async function screenshotHtml(html: string, outputDir: string): Promise<S
  */
 export async function fetchWebpage(url: string): Promise<{ html: string; statusCode: number; headers: Record<string, string> }> {
   const fullUrl = url.startsWith("http") ? url : `https://${url}`;
+
+  // Validate URL scheme and block internal/private targets
+  if (!isValidUrl(fullUrl, ["https:", "http:"])) {
+    throw new Error(`Invalid URL scheme (only http/https allowed): ${url}`);
+  }
+  const urlObj = new URL(fullUrl);
+  await assertPublicHostname(urlObj.hostname);
+
   const response = await fetch(fullUrl, {
     headers: {
       "User-Agent": "Mozilla/5.0 (compatible; ModernizerBot/1.0)",

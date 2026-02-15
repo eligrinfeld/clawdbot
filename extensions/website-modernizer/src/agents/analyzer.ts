@@ -10,6 +10,7 @@ import { runLighthouseAudit } from "../services/lighthouse.js";
 import { fetchWebpage, takeScreenshot } from "../services/screenshot.js";
 import { websiteAnalysisPrompt, screenshotAnalysisPrompt } from "../templates/prompts.js";
 import { join } from "node:path";
+import { sanitizeHtmlForLlm } from "../security.js";
 
 interface LlmAnalysisResult {
   businessInfo: {
@@ -96,10 +97,12 @@ export async function analyzeLead(
       screenshotAnalysis = parseLlmJson<ScreenshotAnalysis>(screenshotResult.text);
     }
 
-    // Step 4: LLM content analysis
+    // Step 4: Sanitize HTML before LLM processing (prevent prompt injection)
+    const cleanHtml = sanitizeHtmlForLlm(html);
+
     const analysisPrompt = websiteAnalysisPrompt({
       domain: lead.domain,
-      htmlSnippet: html,
+      htmlSnippet: cleanHtml,
       lighthouseScores: lighthouse.scores,
       isMobileResponsive,
     });

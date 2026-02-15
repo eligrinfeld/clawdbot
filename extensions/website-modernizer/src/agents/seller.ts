@@ -68,6 +68,17 @@ export async function pitchLead(
       return { success: false, error: "Daily email limit reached", costUsd: 0, durationMs: Date.now() - startTime };
     }
 
+    // Check per-domain rate limit (max 1 email per domain per 30 days)
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+    if (db.countEmailsToDomainSince(lead.domain, thirtyDaysAgo) > 0) {
+      return { success: false, error: `Already contacted ${lead.domain} within last 30 days`, costUsd: 0, durationMs: Date.now() - startTime };
+    }
+
+    // Check monthly cost budget
+    if (db.getMonthlyTotalCost() >= config.maxMonthlyCostUsd) {
+      return { success: false, error: "Monthly cost budget exceeded", costUsd: 0, durationMs: Date.now() - startTime };
+    }
+
     // Step 2: Generate outreach email
     const previewUrl = site.previewUrl ?? `https://example.com/demo/${leadId}`;
     const emailContent = await generateOutreachEmail(config, {

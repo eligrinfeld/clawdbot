@@ -4,11 +4,13 @@
  */
 
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { LighthouseScores } from "../types.js";
+import { isValidUrl } from "../security.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -29,7 +31,7 @@ export async function runLighthouseAudit(target: string): Promise<LighthouseResu
   if (target.trimStart().startsWith("<")) {
     const tmpDir = join(tmpdir(), "modernizer-lighthouse");
     mkdirSync(tmpDir, { recursive: true });
-    tempFile = join(tmpDir, `audit-${Date.now()}.html`);
+    tempFile = join(tmpDir, `audit-${randomUUID()}.html`);
     writeFileSync(tempFile, target, "utf-8");
     url = `file://${tempFile}`;
   }
@@ -47,7 +49,12 @@ export async function runLighthouseAudit(target: string): Promise<LighthouseResu
 }
 
 async function runLighthouseCli(url: string): Promise<LighthouseResult> {
-  const outputPath = join(tmpdir(), `lh-report-${Date.now()}.json`);
+  // Validate URL scheme before passing to external CLI process
+  if (!isValidUrl(url, ["https:", "http:", "file:"])) {
+    throw new Error(`Invalid URL scheme for Lighthouse audit: ${url}`);
+  }
+
+  const outputPath = join(tmpdir(), `lh-report-${randomUUID()}.json`);
 
   try {
     await execFileAsync("npx", [
