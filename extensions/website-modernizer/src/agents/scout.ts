@@ -5,7 +5,8 @@
 
 import type { ModernizerConfig, Lead, StageResult } from "../types.js";
 import type { ModernizerDb } from "../db/client.js";
-import { callLlm, parseLlmJson } from "../services/llm.js";
+import { parseLlmJson } from "../services/llm.js";
+import { routedLlm, type BudgetManager } from "../services/router.js";
 import { fetchWebpage } from "../services/screenshot.js";
 import { domainQualificationPrompt } from "../templates/prompts.js";
 import { isValidDomain, sanitizeHtmlForLlm } from "../security.js";
@@ -50,6 +51,7 @@ export async function scoutDomains(
   db: ModernizerDb,
   domains: string[],
   source: string,
+  budgetManager: BudgetManager,
 ): Promise<StageResult<ScoutResult>> {
   const startTime = Date.now();
   let totalCost = 0;
@@ -72,7 +74,7 @@ export async function scoutDomains(
     }
 
     try {
-      const result = await qualifyDomain(config, cleanDomain);
+      const result = await qualifyDomain(config, cleanDomain, budgetManager);
       totalCost += result.cost;
 
       if (result.qualified) {
@@ -116,12 +118,13 @@ export async function discoverByNiche(
   db: ModernizerDb,
   niche: string,
   location: string,
+  budgetManager: BudgetManager,
   maxResults: number = 20,
 ): Promise<StageResult<ScoutResult>> {
   const startTime = Date.now();
   let totalCost = 0;
 
-  // Use LLM to generate search queries for the niche
+  // Use cheap classify tier to generate search queries for the niche
   const queryPrompt = `Generate ${Math.min(maxResults, 10)} specific Google search queries to find small ${niche} businesses in ${location} that likely have outdated websites. Output ONLY a JSON array of strings, no explanation.
 
 Examples of good queries:
@@ -131,17 +134,17 @@ Examples of good queries:
 
 Focus on queries that will surface small, local businesses.`;
 
-  const queryResult = await callLlm(config, queryPrompt, {
-    model: "claude-haiku-4-5-20251001",
+  const queryResult = await routedLlm(config, budgetManager, queryPrompt, {
+    taskType: "classify",
     maxTokens: 512,
     temperature: 0.5,
+    requireJson: true,
   });
   totalCost += queryResult.costUsd;
 
   const queries = parseLlmJson<string[]>(queryResult.text);
 
-  // For now, extract domain suggestions from LLM knowledge
-  // In production, these would come from actual web search API
+  // Extract domain suggestions via cheap tier
   const domainPrompt = `For these search queries about ${niche} businesses in ${location}:
 ${queries.slice(0, 5).join("\n")}
 
@@ -149,10 +152,11 @@ Suggest ${maxResults} real-looking small business domain names (not actual real 
 
 Output ONLY a JSON array of domain strings.`;
 
-  const domainResult = await callLlm(config, domainPrompt, {
-    model: "claude-haiku-4-5-20251001",
+  const domainResult = await routedLlm(config, budgetManager, domainPrompt, {
+    taskType: "classify",
     maxTokens: 1024,
     temperature: 0.7,
+    requireJson: true,
   });
   totalCost += domainResult.costUsd;
 
@@ -164,7 +168,7 @@ Output ONLY a JSON array of domain strings.`;
   }
 
   // Now scout these domains
-  const scoutResult = await scoutDomains(config, db, suggestedDomains, `niche:${niche}:${location}`);
+  const scoutResult = await scoutDomains(config, db, suggestedDomains, `niche:${niche}:${location}`, budgetManager);
   scoutResult.costUsd += totalCost;
 
   return scoutResult;
@@ -176,6 +180,7 @@ Output ONLY a JSON array of domain strings.`;
 async function qualifyDomain(
   config: ModernizerConfig,
   domain: string,
+  budgetManager: BudgetManager,
 ): Promise<{ qualified: boolean; data: QualificationResult; cost: number }> {
   // Step 1: Fetch the site
   let html: string;
@@ -225,17 +230,18 @@ async function qualifyDomain(
   // Step 4: Sanitize HTML before LLM processing (prevent prompt injection)
   const cleanHtml = sanitizeHtmlForLlm(html);
 
-  // Step 5: LLM qualification (use Haiku for cost efficiency)
+  // Step 5: LLM qualification via router (routes to classify tier - cheapest)
   const prompt = domainQualificationPrompt({
     domain,
     htmlSnippet: cleanHtml,
     copyrightYear,
   });
 
-  const result = await callLlm(config, prompt, {
-    model: "claude-haiku-4-5-20251001",
+  const result = await routedLlm(config, budgetManager, prompt, {
+    taskType: "classify",
     maxTokens: 512,
     temperature: 0.1,
+    requireJson: true,
   });
 
   const qualification = parseLlmJson<QualificationResult>(result.text);

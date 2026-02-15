@@ -1,10 +1,12 @@
 /**
  * Master Orchestrator: Coordinates the full Scout → Analyze → Build → Sell pipeline.
  * Manages lead lifecycle, resource allocation, and strategic decisions.
+ * Creates a shared BudgetManager for all agents to track spend.
  */
 
 import type { ModernizerConfig, Lead, LeadStatus, StageResult } from "../types.js";
 import { ModernizerDb } from "../db/client.js";
+import { createBudgetManager, type BudgetManager } from "../services/router.js";
 import { scoutDomains, discoverByNiche } from "./scout.js";
 import { analyzeLead } from "./analyzer.js";
 import { buildSite } from "./builder.js";
@@ -16,6 +18,7 @@ export interface PipelineStats {
   totalRevenue: number;
   totalCost: number;
   profitMargin: number;
+  budgetState: ReturnType<BudgetManager["getState"]>;
 }
 
 export interface RunPipelineOptions {
@@ -45,14 +48,19 @@ export interface RunResult {
 /**
  * The Orchestrator manages the full pipeline lifecycle.
  * Each call to run() advances leads through the pipeline.
+ * A shared BudgetManager tracks spend across all stages.
  */
 export class Orchestrator {
   private db: ModernizerDb;
   private config: ModernizerConfig;
+  private budgetManager: BudgetManager;
 
   constructor(config: ModernizerConfig) {
     this.config = config;
     this.db = new ModernizerDb(config.dataDir);
+    // Initialize budget manager with current month's DB spend
+    const currentMonthSpend = this.db.getMonthlyTotalCost();
+    this.budgetManager = createBudgetManager(config.router, currentMonthSpend);
   }
 
   /**
@@ -102,6 +110,7 @@ export class Orchestrator {
       totalRevenue,
       totalCost,
       profitMargin: totalRevenue > 0 ? (totalRevenue - totalCost) / totalRevenue : 0,
+      budgetState: this.budgetManager.getState(),
     };
   }
 
@@ -110,7 +119,7 @@ export class Orchestrator {
    */
   async processSingleDomain(domain: string): Promise<{ results: RunResult[]; leadId: number | null }> {
     // Scout
-    const scoutResult = await scoutDomains(this.config, this.db, [domain], "manual");
+    const scoutResult = await scoutDomains(this.config, this.db, [domain], "manual", this.budgetManager);
     if (!scoutResult.data?.leads.length) {
       return {
         results: [{ stage: "scout", processed: 1, succeeded: 0, failed: 1, totalCost: scoutResult.costUsd, totalDurationMs: scoutResult.durationMs, details: ["Domain did not qualify"] }],
@@ -123,7 +132,7 @@ export class Orchestrator {
     results.push({ stage: "scout", processed: 1, succeeded: 1, failed: 0, totalCost: scoutResult.costUsd, totalDurationMs: scoutResult.durationMs, details: [`Lead ${leadId} created`] });
 
     // Analyze
-    const analyzeResult = await analyzeLead(this.config, this.db, leadId);
+    const analyzeResult = await analyzeLead(this.config, this.db, leadId, this.budgetManager);
     results.push({ stage: "analyze", processed: 1, succeeded: analyzeResult.success ? 1 : 0, failed: analyzeResult.success ? 0 : 1, totalCost: analyzeResult.costUsd, totalDurationMs: analyzeResult.durationMs, details: [analyzeResult.error ?? "Analysis complete"] });
 
     if (!analyzeResult.success || analyzeResult.data?.decision === "skip") {
@@ -131,7 +140,7 @@ export class Orchestrator {
     }
 
     // Build
-    const buildResult = await buildSite(this.config, this.db, analyzeResult.data!, leadId);
+    const buildResult = await buildSite(this.config, this.db, analyzeResult.data!, leadId, this.budgetManager);
     results.push({ stage: "build", processed: 1, succeeded: buildResult.success ? 1 : 0, failed: buildResult.success ? 0 : 1, totalCost: buildResult.costUsd, totalDurationMs: buildResult.durationMs, details: [buildResult.error ?? `Site built, preview: ${buildResult.data?.previewUrl ?? "N/A"}`] });
 
     if (!buildResult.success) {
@@ -139,7 +148,7 @@ export class Orchestrator {
     }
 
     // Sell
-    const sellResult = await pitchLead(this.config, this.db, leadId);
+    const sellResult = await pitchLead(this.config, this.db, leadId, this.budgetManager);
     results.push({ stage: "sell", processed: 1, succeeded: sellResult.success ? 1 : 0, failed: sellResult.success ? 0 : 1, totalCost: sellResult.costUsd, totalDurationMs: sellResult.durationMs, details: [sellResult.error ?? "Outreach sent"] });
 
     return { results, leadId };
@@ -157,7 +166,7 @@ export class Orchestrator {
     const details: string[] = [];
 
     if (opts.domains?.length) {
-      const result = await scoutDomains(this.config, this.db, opts.domains, "manual");
+      const result = await scoutDomains(this.config, this.db, opts.domains, "manual", this.budgetManager);
       totalCost += result.costUsd;
       details.push(`Scouted ${opts.domains.length} domains: ${result.data?.qualified ?? 0} qualified, ${result.data?.rejected ?? 0} rejected`);
       return {
@@ -172,7 +181,7 @@ export class Orchestrator {
     }
 
     if (opts.niche && opts.location) {
-      const result = await discoverByNiche(this.config, this.db, opts.niche, opts.location, batchSize);
+      const result = await discoverByNiche(this.config, this.db, opts.niche, opts.location, this.budgetManager, batchSize);
       totalCost += result.costUsd;
       details.push(`Niche discovery (${opts.niche} in ${opts.location}): ${result.data?.qualified ?? 0} qualified`);
       return {
@@ -207,7 +216,7 @@ export class Orchestrator {
     }
 
     for (const lead of leads) {
-      const result = await analyzeLead(this.config, this.db, lead.id);
+      const result = await analyzeLead(this.config, this.db, lead.id, this.budgetManager);
       totalCost += result.costUsd;
       if (result.success) {
         succeeded++;
@@ -271,7 +280,7 @@ export class Orchestrator {
         batch.map(async (lead) => {
           const analysis = this.db.getAnalysis(lead.id);
           if (!analysis) return { lead, result: { success: false, error: "No analysis", costUsd: 0, durationMs: 0 } as StageResult<unknown> };
-          return { lead, result: await buildSite(this.config, this.db, analysis, lead.id) };
+          return { lead, result: await buildSite(this.config, this.db, analysis, lead.id, this.budgetManager) };
         }),
       );
 
@@ -314,7 +323,7 @@ export class Orchestrator {
     }
 
     for (const lead of leads) {
-      const result = await pitchLead(this.config, this.db, lead.id);
+      const result = await pitchLead(this.config, this.db, lead.id, this.budgetManager);
       totalCost += result.costUsd;
       if (result.success) {
         succeeded++;

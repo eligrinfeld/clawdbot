@@ -1,6 +1,8 @@
 /**
  * LLM service: wraps Anthropic API calls with cost tracking and retries.
- * Used by all agents for structured JSON generation.
+ *
+ * This module provides the low-level callLlm() for direct Anthropic calls.
+ * For routed multi-model calls, use routedLlm() from ./router.ts instead.
  */
 
 import type { ModernizerConfig } from "../types.js";
@@ -36,6 +38,10 @@ function estimateCost(model: string, inputTokens: number, outputTokens: number):
   return (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
 }
 
+/**
+ * Direct Anthropic API call. Preserved for backward compatibility.
+ * Prefer routedLlm() from ./router.ts for new code.
+ */
 export async function callLlm(
   config: ModernizerConfig,
   prompt: string,

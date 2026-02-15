@@ -8,7 +8,8 @@
 
 import type { ModernizerConfig, Analysis, DesignSystem, GeneratedSite, LighthouseScores, StageResult } from "../types.js";
 import type { ModernizerDb } from "../db/client.js";
-import { callLlm, parseLlmJson } from "../services/llm.js";
+import { parseLlmJson } from "../services/llm.js";
+import { routedLlm, type BudgetManager } from "../services/router.js";
 import { runLighthouseAudit } from "../services/lighthouse.js";
 import { deploySite } from "../services/hosting.js";
 import {
@@ -52,6 +53,7 @@ export async function buildSite(
   db: ModernizerDb,
   analysis: Analysis,
   leadId: number,
+  budgetManager: BudgetManager,
 ): Promise<StageResult<BuildResult>> {
   const startTime = Date.now();
   let totalCost = 0;
@@ -65,12 +67,12 @@ export async function buildSite(
   try {
     db.updateLeadStatus(leadId, "building");
 
-    // Step 1: Generate design system
-    const designSystem = await generateDesignSystem(config, businessInfo);
+    // Step 1: Generate design system (extract_structured → cheap tier)
+    const designSystem = await generateDesignSystem(config, businessInfo, budgetManager);
     totalCost += designSystem.cost;
 
-    // Step 2: Generate content
-    const content = await generateContent(config, businessInfo);
+    // Step 2: Generate content (copy_outreach → cheap tier)
+    const content = await generateContent(config, businessInfo, budgetManager);
     totalCost += content.cost;
 
     // Step 3 + 4: Generate and QA (with regeneration loop)
@@ -81,14 +83,14 @@ export async function buildSite(
 
     for (let attempt = 0; attempt <= config.maxRegenAttempts; attempt++) {
       if (attempt === 0) {
-        // Initial generation
-        const result = await generateSiteHtml(config, businessInfo, content.data, designSystem.data, lead);
+        // Initial generation via coder tier
+        const result = await generateSiteHtml(config, businessInfo, content.data, designSystem.data, lead, budgetManager);
         html = sanitizeGeneratedHtml(result.html);
         totalCost += result.cost;
       } else {
-        // Regeneration with feedback
+        // Regeneration with feedback, escalating after failures
         regenCount++;
-        const result = await regenerateSiteHtml(config, html, lighthouseResult.issues, []);
+        const result = await regenerateSiteHtml(config, html, lighthouseResult.issues, [], budgetManager, attempt);
         html = sanitizeGeneratedHtml(result.html);
         totalCost += result.cost;
       }
@@ -161,6 +163,7 @@ export async function buildSite(
 async function generateDesignSystem(
   config: ModernizerConfig,
   info: NonNullable<Analysis["businessInfo"]>,
+  budgetManager: BudgetManager,
 ): Promise<{ data: DesignSystem; cost: number }> {
   const prompt = designSystemPrompt({
     businessName: info.name,
@@ -168,7 +171,12 @@ async function generateDesignSystem(
     brandTone: info.brandTone,
   });
 
-  const result = await callLlm(config, prompt, { temperature: 0.5, maxTokens: 1024 });
+  const result = await routedLlm(config, budgetManager, prompt, {
+    taskType: "extract_structured",
+    temperature: 0.5,
+    maxTokens: 1024,
+    requireJson: true,
+  });
   const data = parseLlmJson<DesignSystem>(result.text);
 
   return { data, cost: result.costUsd };
@@ -177,6 +185,7 @@ async function generateDesignSystem(
 async function generateContent(
   config: ModernizerConfig,
   info: NonNullable<Analysis["businessInfo"]>,
+  budgetManager: BudgetManager,
 ): Promise<{ data: GeneratedContent; cost: number }> {
   const prompt = contentGenerationPrompt({
     businessName: info.name,
@@ -189,7 +198,13 @@ async function generateContent(
     email: info.email,
   });
 
-  const result = await callLlm(config, prompt, { temperature: 0.4, maxTokens: 2048 });
+  // Content generation → copy_outreach tier (cheap for draft)
+  const result = await routedLlm(config, budgetManager, prompt, {
+    taskType: "copy_outreach",
+    temperature: 0.4,
+    maxTokens: 2048,
+    requireJson: true,
+  });
   const data = parseLlmJson<GeneratedContent>(result.text);
 
   return { data, cost: result.costUsd };
@@ -201,6 +216,7 @@ async function generateSiteHtml(
   content: GeneratedContent,
   designSystem: DesignSystem,
   lead: { contactPhone: string | null; contactEmail: string | null; location: string | null },
+  budgetManager: BudgetManager,
 ): Promise<{ html: string; cost: number }> {
   const prompt = siteGenerationPrompt({
     businessName: businessInfo.name,
@@ -212,9 +228,9 @@ async function generateSiteHtml(
     location: lead.location ?? businessInfo.location,
   });
 
-  // Use a higher-capability model for code generation
-  const result = await callLlm(config, prompt, {
-    model: "claude-sonnet-4-5-20250929",
+  // Site generation → coder tier (specialized coding model)
+  const result = await routedLlm(config, budgetManager, prompt, {
+    taskType: "code_write",
     temperature: 0.2,
     maxTokens: 16384,
   });
@@ -233,6 +249,8 @@ async function regenerateSiteHtml(
   previousHtml: string,
   lighthouseIssues: string[],
   validationErrors: string[],
+  budgetManager: BudgetManager,
+  attempt: number,
 ): Promise<{ html: string; cost: number }> {
   const prompt = siteRegenerationPrompt({
     previousHtml,
@@ -240,10 +258,12 @@ async function regenerateSiteHtml(
     validationErrors,
   });
 
-  const result = await callLlm(config, prompt, {
-    model: "claude-sonnet-4-5-20250929",
+  // Regeneration → coder tier, escalate to agent_orchestrator after 2 failures
+  const result = await routedLlm(config, budgetManager, prompt, {
+    taskType: "code_write",
     temperature: 0.1,
     maxTokens: 16384,
+    previousFailures: attempt,
   });
 
   let html = result.text.trim();

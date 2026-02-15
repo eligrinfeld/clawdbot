@@ -119,6 +119,101 @@ export interface Sale {
   supportUntil: string | null;
 }
 
+// ── Model Router Types ──
+
+/** Task types tag every LLM call for routing. */
+export type TaskType =
+  | "classify"
+  | "extract_structured"
+  | "plan"
+  | "reason"
+  | "tool_decision"
+  | "long_context"
+  | "code_write"
+  | "code_review"
+  | "copy_outreach"
+  | "safety_compliance";
+
+/** Model tier identifiers. */
+export type ModelTierId =
+  | "tier0_fast"
+  | "reasoning_default"
+  | "agent_orchestrator"
+  | "long_context"
+  | "coder";
+
+/** LLM provider type. */
+export type ProviderType = "anthropic" | "openrouter" | "openai_compatible";
+
+/** Configuration for a single model tier. */
+export interface ModelTierConfig {
+  provider: ProviderType;
+  model: string;
+  maxContext: number;
+  baseUrl?: string;
+  apiKeyEnv?: string;
+}
+
+/** A routing rule maps a task type to a model tier with parameters. */
+export interface RoutingRule {
+  taskType: TaskType;
+  modelTier: ModelTierId;
+  maxTokens: number;
+  temperature?: number;
+  escalateIf?: {
+    retriesGte?: number;
+    toolFailuresGte?: number;
+    complexityGte?: number;
+  };
+}
+
+/** Budget configuration with rate limiting and throttle thresholds. */
+export interface BudgetConfig {
+  monthlyCapUsd: number;
+  softThrottlePct: number;
+  hardThrottlePct: number;
+  tokenRateLimit: {
+    tokensPerMinute: number;
+    burstTokens: number;
+  };
+}
+
+/** Escalation policy when calls fail or get stuck. */
+export interface EscalationPolicy {
+  onSchemaFailure: ModelTierId[];
+  onToolLoopStuck: { afterAttempts: number; escalateTo: ModelTierId };
+  onLongContextOverflow: {
+    summarizeWith: ModelTierId;
+    reasonWith: ModelTierId;
+    fallback: ModelTierId;
+  };
+}
+
+/** Quality gate configuration. */
+export interface QualityGateConfig {
+  requireJsonSchemaFor: TaskType[];
+  requireEvidenceFor: TaskType[];
+  confidenceThreshold: number;
+}
+
+/** Complete router configuration. */
+export interface RouterConfig {
+  budget: BudgetConfig;
+  models: Record<ModelTierId, ModelTierConfig>;
+  routingRules: RoutingRule[];
+  escalationPolicy: EscalationPolicy;
+  qualityGates: QualityGateConfig;
+}
+
+/** Snapshot of the budget manager's state. */
+export interface BudgetState {
+  monthSpendUsd: number;
+  monthlyCapUsd: number;
+  utilization: number;
+  throttleLevel: "normal" | "soft" | "hard" | "stopped";
+  withinRateLimit: boolean;
+}
+
 /** Config shape for the plugin. */
 export interface ModernizerConfig {
   dataDir: string;
@@ -138,7 +233,83 @@ export interface ModernizerConfig {
   maxMonthlyCostUsd: number;
   /** Max LLM/API spend per individual lead (USD). Lead is skipped if exceeded. */
   maxPerLeadCostUsd: number;
+  /** Model router configuration. */
+  router: RouterConfig;
 }
+
+export const DEFAULT_ROUTER_CONFIG: RouterConfig = {
+  budget: {
+    monthlyCapUsd: 200,
+    softThrottlePct: 0.70,
+    hardThrottlePct: 0.90,
+    tokenRateLimit: {
+      tokensPerMinute: 120_000,
+      burstTokens: 300_000,
+    },
+  },
+  models: {
+    tier0_fast: {
+      provider: "anthropic",
+      model: "claude-haiku-4-5-20251001",
+      maxContext: 32_000,
+    },
+    reasoning_default: {
+      provider: "openrouter",
+      model: "deepseek/deepseek-chat",
+      maxContext: 128_000,
+      apiKeyEnv: "OPENROUTER_API_KEY",
+    },
+    agent_orchestrator: {
+      provider: "openrouter",
+      model: "moonshotai/kimi-k2",
+      maxContext: 262_000,
+      apiKeyEnv: "OPENROUTER_API_KEY",
+    },
+    long_context: {
+      provider: "openrouter",
+      model: "minimax/minimax-01",
+      maxContext: 1_000_000,
+      apiKeyEnv: "OPENROUTER_API_KEY",
+    },
+    coder: {
+      provider: "openrouter",
+      model: "mistralai/devstral-small-2505",
+      maxContext: 200_000,
+      apiKeyEnv: "OPENROUTER_API_KEY",
+    },
+  },
+  routingRules: [
+    { taskType: "classify", modelTier: "tier0_fast", maxTokens: 256 },
+    { taskType: "extract_structured", modelTier: "tier0_fast", maxTokens: 800 },
+    { taskType: "tool_decision", modelTier: "tier0_fast", maxTokens: 400 },
+    { taskType: "reason", modelTier: "reasoning_default", maxTokens: 1400 },
+    {
+      taskType: "plan",
+      modelTier: "reasoning_default",
+      maxTokens: 1800,
+      escalateIf: { retriesGte: 2, toolFailuresGte: 2, complexityGte: 0.7 },
+    },
+    { taskType: "long_context", modelTier: "long_context", maxTokens: 2400 },
+    { taskType: "code_write", modelTier: "coder", maxTokens: 2400 },
+    { taskType: "code_review", modelTier: "coder", maxTokens: 1800 },
+    { taskType: "copy_outreach", modelTier: "tier0_fast", maxTokens: 900, temperature: 0.4 },
+    { taskType: "safety_compliance", modelTier: "reasoning_default", maxTokens: 512 },
+  ],
+  escalationPolicy: {
+    onSchemaFailure: ["tier0_fast", "reasoning_default", "agent_orchestrator"],
+    onToolLoopStuck: { afterAttempts: 2, escalateTo: "agent_orchestrator" },
+    onLongContextOverflow: {
+      summarizeWith: "tier0_fast",
+      reasonWith: "reasoning_default",
+      fallback: "long_context",
+    },
+  },
+  qualityGates: {
+    requireJsonSchemaFor: ["extract_structured", "plan", "code_write"],
+    requireEvidenceFor: ["copy_outreach"],
+    confidenceThreshold: 0.72,
+  },
+};
 
 export const DEFAULT_CONFIG: Omit<ModernizerConfig, "dataDir"> = {
   maxConcurrentBuilds: 3,
@@ -148,6 +319,7 @@ export const DEFAULT_CONFIG: Omit<ModernizerConfig, "dataDir"> = {
   priceUsd: 200,
   maxMonthlyCostUsd: 500,
   maxPerLeadCostUsd: 10,
+  router: DEFAULT_ROUTER_CONFIG,
 };
 
 /** Pipeline stage result with cost tracking. */

@@ -5,7 +5,8 @@
 
 import type { ModernizerConfig, StageResult, OutreachRecord, ReplySentiment } from "../types.js";
 import type { ModernizerDb } from "../db/client.js";
-import { callLlm, parseLlmJson } from "../services/llm.js";
+import { parseLlmJson } from "../services/llm.js";
+import { routedLlm, type BudgetManager } from "../services/router.js";
 import { sendEmail, isValidEmail } from "../services/email.js";
 import { createPaymentLink } from "../services/payment.js";
 import {
@@ -39,6 +40,7 @@ export async function pitchLead(
   config: ModernizerConfig,
   db: ModernizerDb,
   leadId: number,
+  budgetManager: BudgetManager,
 ): Promise<StageResult<SellResult>> {
   const startTime = Date.now();
   let totalCost = 0;
@@ -79,7 +81,7 @@ export async function pitchLead(
       return { success: false, error: "Monthly cost budget exceeded", costUsd: 0, durationMs: Date.now() - startTime };
     }
 
-    // Step 2: Generate outreach email
+    // Step 2: Generate outreach email (high-risk → reasoning tier for compliance)
     const previewUrl = site.previewUrl ?? `https://example.com/demo/${leadId}`;
     const emailContent = await generateOutreachEmail(config, {
       businessName: lead.businessName ?? lead.domain,
@@ -89,7 +91,7 @@ export async function pitchLead(
       improvements: analysis.keyImprovements,
       previewUrl,
       priceUsd: config.priceUsd,
-    });
+    }, budgetManager);
     totalCost += emailContent.cost;
 
     // Step 3: Create payment link (best-effort)
@@ -148,12 +150,15 @@ export async function pitchLead(
 export async function classifyReply(
   config: ModernizerConfig,
   replyText: string,
+  budgetManager: BudgetManager,
 ): Promise<{ classification: ReplyClassification; cost: number }> {
   const prompt = replyClassificationPrompt(replyText);
-  const result = await callLlm(config, prompt, {
-    model: "claude-haiku-4-5-20251001",
+  // Reply classification → classify tier (cheap + fast)
+  const result = await routedLlm(config, budgetManager, prompt, {
+    taskType: "classify",
     maxTokens: 512,
     temperature: 0.1,
+    requireJson: true,
   });
 
   const classification = parseLlmJson<ReplyClassification>(result.text);
@@ -169,6 +174,7 @@ export async function generateFollowUp(
   leadId: number,
   replyText: string,
   sentiment: ReplySentiment,
+  budgetManager: BudgetManager,
 ): Promise<{ subject: string; body: string; cost: number }> {
   const lead = db.getLead(leadId);
   const outreach = db.getOutreach(leadId);
@@ -183,10 +189,13 @@ export async function generateFollowUp(
     priceUsd: config.priceUsd,
   });
 
-  const result = await callLlm(config, prompt, {
-    model: "claude-sonnet-4-5-20250929",
+  // Follow-up emails are high-risk (going to real people) → reasoning tier
+  const result = await routedLlm(config, budgetManager, prompt, {
+    taskType: "copy_outreach",
     maxTokens: 1024,
     temperature: 0.3,
+    riskLevel: "high",
+    requireJson: true,
   });
 
   const data = parseLlmJson<{ subject: string; body: string }>(result.text);
@@ -203,12 +212,16 @@ export function handleUnsubscribe(db: ModernizerDb, email: string): void {
 async function generateOutreachEmail(
   config: ModernizerConfig,
   info: Parameters<typeof outreachEmailPrompt>[0],
+  budgetManager: BudgetManager,
 ): Promise<{ subject: string; body: string; cost: number }> {
   const prompt = outreachEmailPrompt(info);
-  const result = await callLlm(config, prompt, {
-    model: "claude-sonnet-4-5-20250929",
+  // Outreach emails are high-risk → routed to reasoning tier for compliance
+  const result = await routedLlm(config, budgetManager, prompt, {
+    taskType: "copy_outreach",
     maxTokens: 1024,
     temperature: 0.4,
+    riskLevel: "high",
+    requireJson: true,
   });
 
   const data = parseLlmJson<{ subject: string; body: string }>(result.text);

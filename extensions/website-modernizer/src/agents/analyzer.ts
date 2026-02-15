@@ -5,7 +5,8 @@
 
 import type { ModernizerConfig, Analysis, StageResult } from "../types.js";
 import type { ModernizerDb } from "../db/client.js";
-import { callLlm, parseLlmJson } from "../services/llm.js";
+import { parseLlmJson } from "../services/llm.js";
+import { routedLlm, type BudgetManager } from "../services/router.js";
 import { runLighthouseAudit } from "../services/lighthouse.js";
 import { fetchWebpage, takeScreenshot } from "../services/screenshot.js";
 import { websiteAnalysisPrompt, screenshotAnalysisPrompt } from "../templates/prompts.js";
@@ -55,6 +56,7 @@ export async function analyzeLead(
   config: ModernizerConfig,
   db: ModernizerDb,
   leadId: number,
+  budgetManager: BudgetManager,
 ): Promise<StageResult<Analysis>> {
   const startTime = Date.now();
   let totalCost = 0;
@@ -86,12 +88,15 @@ export async function analyzeLead(
     let screenshotAnalysis: ScreenshotAnalysis | undefined;
 
     if (screenshot) {
-      // Analyze screenshot with vision model
-      const screenshotResult = await callLlm(config, screenshotAnalysisPrompt(), {
-        model: "claude-sonnet-4-5-20250929",
+      // Analyze screenshot with vision model via extract_structured task
+      const screenshotResult = await routedLlm(config, budgetManager, screenshotAnalysisPrompt(), {
+        taskType: "extract_structured",
         imageBase64: screenshot.base64,
         imageMimeType: "image/png",
         maxTokens: 1024,
+        // Vision requires Anthropic - force tier0 which defaults to Anthropic
+        forceTier: "tier0_fast",
+        requireJson: true,
       });
       totalCost += screenshotResult.costUsd;
       screenshotAnalysis = parseLlmJson<ScreenshotAnalysis>(screenshotResult.text);
@@ -107,11 +112,12 @@ export async function analyzeLead(
       isMobileResponsive,
     });
 
-    // Use Haiku for cost efficiency on analysis
-    const analysisResult = await callLlm(config, analysisPrompt, {
-      model: "claude-sonnet-4-5-20250929",
+    // Use reasoning tier for deep analysis
+    const analysisResult = await routedLlm(config, budgetManager, analysisPrompt, {
+      taskType: "reason",
       maxTokens: 2048,
       temperature: 0.2,
+      requireJson: true,
     });
     totalCost += analysisResult.costUsd;
 

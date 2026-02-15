@@ -5,7 +5,8 @@
 
 import { Type } from "@sinclair/typebox";
 import type { ClawdbotPluginApi } from "../../../../src/plugins/types.js";
-import { callLlm, parseLlmJson } from "../services/llm.js";
+import { parseLlmJson } from "../services/llm.js";
+import { routedLlm, createBudgetManager } from "../services/router.js";
 import { runLighthouseAudit } from "../services/lighthouse.js";
 import { siteGenerationPrompt, designSystemPrompt, contentGenerationPrompt } from "../templates/prompts.js";
 import { resolveConfig } from "../config.js";
@@ -38,6 +39,7 @@ Provide business details and get back a complete website. The generated site inc
     }),
     async execute(_toolCallId: string, args: Record<string, unknown>) {
       const config = resolveConfig(api);
+      const budgetManager = createBudgetManager(config.router);
       const businessName = String(args.business_name);
       const industry = String(args.industry);
       const services = args.services ? String(args.services).split(",").map((s) => s.trim()) : [];
@@ -48,13 +50,18 @@ Provide business details and get back a complete website. The generated site inc
       let totalCost = 0;
 
       try {
-        // Step 1: Design system
+        // Step 1: Design system via extract_structured tier
         const dsPrompt = designSystemPrompt({ businessName, industry, brandTone: tone });
-        const dsResult = await callLlm(config, dsPrompt, { temperature: 0.5, maxTokens: 1024 });
+        const dsResult = await routedLlm(config, budgetManager, dsPrompt, {
+          taskType: "extract_structured",
+          temperature: 0.5,
+          maxTokens: 1024,
+          requireJson: true,
+        });
         totalCost += dsResult.costUsd;
         const designSystem = parseLlmJson<DesignSystem>(dsResult.text);
 
-        // Step 2: Content
+        // Step 2: Content via copy_outreach tier
         const contentPrompt = contentGenerationPrompt({
           businessName,
           industry,
@@ -65,11 +72,16 @@ Provide business details and get back a complete website. The generated site inc
           phone,
           email,
         });
-        const contentResult = await callLlm(config, contentPrompt, { temperature: 0.4, maxTokens: 2048 });
+        const contentResult = await routedLlm(config, budgetManager, contentPrompt, {
+          taskType: "copy_outreach",
+          temperature: 0.4,
+          maxTokens: 2048,
+          requireJson: true,
+        });
         totalCost += contentResult.costUsd;
         const content = parseLlmJson<Record<string, unknown>>(contentResult.text);
 
-        // Step 3: Generate site
+        // Step 3: Generate site via coder tier
         const sitePrompt = siteGenerationPrompt({
           businessName,
           industry,
@@ -79,8 +91,8 @@ Provide business details and get back a complete website. The generated site inc
           contactEmail: email,
           location,
         });
-        const siteResult = await callLlm(config, sitePrompt, {
-          model: "claude-sonnet-4-5-20250929",
+        const siteResult = await routedLlm(config, budgetManager, sitePrompt, {
+          taskType: "code_write",
           temperature: 0.2,
           maxTokens: 16384,
         });
@@ -101,18 +113,20 @@ Provide business details and get back a complete website. The generated site inc
         const filePath = join(outputDir, filename);
         writeFileSync(filePath, html, "utf-8");
 
+        const budgetState = budgetManager.getState();
         const summary = [
           `## Generated Website for ${businessName}\n`,
           `**Industry:** ${industry}`,
           `**Design Style:** ${designSystem.style}`,
           `**File:** ${filePath}`,
           `**Size:** ${(html.length / 1024).toFixed(1)} KB`,
+          `**Router:** ${siteResult.tier} (${siteResult.model})`,
           `\n### Lighthouse Scores`,
           `- Performance: ${qaResult.scores.performance}/100`,
           `- Accessibility: ${qaResult.scores.accessibility}/100`,
           `- Best Practices: ${qaResult.scores.bestPractices}/100`,
           `- SEO: ${qaResult.scores.seo}/100`,
-          `\n### Cost: $${totalCost.toFixed(4)}`,
+          `\n### Cost: $${totalCost.toFixed(4)} (budget: $${budgetState.monthSpendUsd.toFixed(2)}/$${budgetState.monthlyCapUsd})`,
         ];
 
         if (qaResult.issues.length > 0) {
@@ -124,7 +138,7 @@ Provide business details and get back a complete website. The generated site inc
 
         return {
           content: [{ type: "text" as const, text: summary.join("\n") }],
-          details: { filePath, scores: qaResult.scores, designSystem, cost: totalCost },
+          details: { filePath, scores: qaResult.scores, designSystem, cost: totalCost, budgetState },
         };
       } catch (err) {
         return {

@@ -1,6 +1,6 @@
 /**
  * E2E tests for the website-modernizer extension.
- * Mocks all external services (Anthropic, SendGrid, Stripe, hosting, Lighthouse)
+ * Mocks all external services (LLM providers, SendGrid, Stripe, hosting, Lighthouse)
  * and exercises the full pipeline: Scout → Analyze → Build → Sell.
  */
 
@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ModernizerDb } from "./db/client.js";
 import { parseLlmJson } from "./services/llm.js";
+import { createBudgetManager } from "./services/router.js";
 import type { ModernizerConfig, Analysis, BusinessInfo } from "./types.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import {
@@ -24,10 +25,20 @@ import {
 
 // ── Mock all external services ──
 
-// Track callLlm invocations so we can return different responses per call
+// Track LLM invocations so we can return different responses per call
 let llmCallIndex = 0;
 const llmResponses: string[] = [];
 
+// Mock the provider layer (callProvider is what routedLlm calls)
+vi.mock("./services/providers.js", () => ({
+  callProvider: vi.fn(async () => {
+    const text = llmResponses[llmCallIndex] ?? "{}";
+    llmCallIndex++;
+    return { text, inputTokens: 500, outputTokens: 200, costUsd: 0.005, model: "mock" };
+  }),
+}));
+
+// Keep callLlm mock for backward compat with direct calls
 vi.mock("./services/llm.js", () => ({
   callLlm: vi.fn(async () => {
     const text = llmResponses[llmCallIndex] ?? "{}";
@@ -151,6 +162,13 @@ describe("Website Modernizer E2E", () => {
       html: OUTDATED_PLUMBER_HTML,
       statusCode: 200,
       headers: {},
+    });
+    // Reset callProvider mock
+    const { callProvider } = await import("./services/providers.js");
+    (callProvider as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      const text = llmResponses[llmCallIndex] ?? "{}";
+      llmCallIndex++;
+      return { text, inputTokens: 500, outputTokens: 200, costUsd: 0.005, model: "mock" };
     });
   });
 
@@ -354,8 +372,9 @@ describe("Website Modernizer E2E", () => {
       llmResponses.push(MOCK_QUALIFICATION);
 
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
-        const result = await scoutDomains(config, db, ["joes-plumbing-austin.com"], "test");
+        const result = await scoutDomains(config, db, ["joes-plumbing-austin.com"], "test", bm);
         expect(result.success).toBe(true);
         expect(result.data!.qualified).toBe(1);
         expect(result.data!.rejected).toBe(0);
@@ -380,8 +399,9 @@ describe("Website Modernizer E2E", () => {
 
       const { scoutDomains } = await import("./agents/scout.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
-        const result = await scoutDomains(config, db, ["squarespace-site.com"], "test");
+        const result = await scoutDomains(config, db, ["squarespace-site.com"], "test", bm);
         expect(result.data!.qualified).toBe(0);
         expect(result.data!.rejected).toBe(1);
         // No LLM calls made (platform check is pre-LLM)
@@ -396,11 +416,12 @@ describe("Website Modernizer E2E", () => {
 
       const { scoutDomains } = await import("./agents/scout.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
         // First scout
-        await scoutDomains(config, db, ["dupe-test.com"], "test");
+        await scoutDomains(config, db, ["dupe-test.com"], "test", bm);
         // Second scout (same domain)
-        const result = await scoutDomains(config, db, ["dupe-test.com"], "test");
+        const result = await scoutDomains(config, db, ["dupe-test.com"], "test", bm);
         expect(result.data!.rejected).toBe(1);
         expect(result.data!.qualified).toBe(0);
       } finally {
@@ -413,8 +434,9 @@ describe("Website Modernizer E2E", () => {
 
       const { scoutDomains } = await import("./agents/scout.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
-        const result = await scoutDomains(config, db, ["https://www.test-domain.com/about"], "test");
+        const result = await scoutDomains(config, db, ["https://www.test-domain.com/about"], "test", bm);
         expect(result.data!.qualified).toBe(1);
 
         const lead = db.getLeadByDomain("test-domain.com");
@@ -427,8 +449,9 @@ describe("Website Modernizer E2E", () => {
     it("should reject invalid domains", async () => {
       const { scoutDomains } = await import("./agents/scout.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
-        const result = await scoutDomains(config, db, ["x", "", "no-dot"], "test");
+        const result = await scoutDomains(config, db, ["x", "", "no-dot"], "test", bm);
         expect(result.data!.rejected).toBe(3);
         expect(result.data!.qualified).toBe(0);
       } finally {
@@ -446,10 +469,11 @@ describe("Website Modernizer E2E", () => {
 
       const { analyzeLead } = await import("./agents/analyzer.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
         const lead = db.insertLead("old-plumber.com", "test");
 
-        const result = await analyzeLead(config, db, lead.id);
+        const result = await analyzeLead(config, db, lead.id, bm);
         expect(result.success).toBe(true);
         expect(result.data!.decision).toBe("go");
         expect(result.data!.improvementPotential).toBe(85);
@@ -473,10 +497,11 @@ describe("Website Modernizer E2E", () => {
 
       const { analyzeLead } = await import("./agents/analyzer.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
         const lead = db.insertLead("modern-site.com", "test");
 
-        const result = await analyzeLead(config, db, lead.id);
+        const result = await analyzeLead(config, db, lead.id, bm);
         expect(result.success).toBe(true);
         expect(result.data!.decision).toBe("skip");
 
@@ -496,9 +521,10 @@ describe("Website Modernizer E2E", () => {
 
       const { analyzeLead } = await import("./agents/analyzer.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
         const lead = db.insertLead("dead-site.com", "test");
-        const result = await analyzeLead(config, db, lead.id);
+        const result = await analyzeLead(config, db, lead.id, bm);
         expect(result.success).toBe(false);
         expect(result.error).toContain("404");
         expect(db.getLead(lead.id)!.status).toBe("analysis_failed");
@@ -512,9 +538,10 @@ describe("Website Modernizer E2E", () => {
 
       const { analyzeLead } = await import("./agents/analyzer.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
         const lead = db.insertLead("metrics-test.com", "test");
-        const result = await analyzeLead(config, db, lead.id);
+        const result = await analyzeLead(config, db, lead.id, bm);
 
         expect(result.costUsd).toBeGreaterThan(0);
         expect(result.durationMs).toBeGreaterThanOrEqual(0);
@@ -542,12 +569,13 @@ describe("Website Modernizer E2E", () => {
 
       const { buildSite } = await import("./agents/builder.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
         const lead = db.insertLead("builder-test.com", "test");
         db.updateLead(lead.id, { contactEmail: "info@test.com", contactPhone: "(555) 123-4567" });
         const analysis = db.insertAnalysis(lead.id, createTestAnalysis(lead.id));
 
-        const result = await buildSite(config, db, analysis, lead.id);
+        const result = await buildSite(config, db, analysis, lead.id, bm);
         expect(result.success).toBe(true);
         expect(result.data!.lighthouseScores.performance).toBe(92);
         expect(result.data!.previewUrl).toBe("https://mod-joes-plumbing-12345.netlify.app");
@@ -581,11 +609,12 @@ describe("Website Modernizer E2E", () => {
 
       const { buildSite } = await import("./agents/builder.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
         const lead = db.insertLead("regen-test.com", "test");
         const analysis = db.insertAnalysis(lead.id, createTestAnalysis(lead.id));
 
-        const result = await buildSite(config, db, analysis, lead.id);
+        const result = await buildSite(config, db, analysis, lead.id, bm);
         expect(result.success).toBe(true);
 
         const site = db.getLatestSite(lead.id)!;
@@ -618,11 +647,12 @@ describe("Website Modernizer E2E", () => {
 
       const { buildSite } = await import("./agents/builder.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
         const lead = db.insertLead("fail-test.com", "test");
         const analysis = db.insertAnalysis(lead.id, createTestAnalysis(lead.id));
 
-        const result = await buildSite(config, db, analysis, lead.id);
+        const result = await buildSite(config, db, analysis, lead.id, bm);
         expect(result.success).toBe(false);
 
         expect(db.getLead(lead.id)!.status).toBe("build_failed");
@@ -649,10 +679,11 @@ describe("Website Modernizer E2E", () => {
       const { deploySite } = await import("./services/hosting.js");
       const { buildSite } = await import("./agents/builder.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
         const lead = db.insertLead("no-deploy.com", "test");
         const analysis = db.insertAnalysis(lead.id, createTestAnalysis(lead.id));
-        await buildSite(config, db, analysis, lead.id);
+        await buildSite(config, db, analysis, lead.id, bm);
         expect(deploySite).not.toHaveBeenCalled();
       } finally {
         db.close();
@@ -662,6 +693,7 @@ describe("Website Modernizer E2E", () => {
     it("should return error if lead has no business info", async () => {
       const { buildSite } = await import("./agents/builder.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
         const lead = db.insertLead("no-info.com", "test");
         const analysis = db.insertAnalysis(lead.id, {
@@ -669,7 +701,7 @@ describe("Website Modernizer E2E", () => {
           businessInfo: null,
         });
 
-        const result = await buildSite(config, db, analysis, lead.id);
+        const result = await buildSite(config, db, analysis, lead.id, bm);
         expect(result.success).toBe(false);
         expect(result.error).toContain("No business info");
       } finally {
@@ -687,6 +719,7 @@ describe("Website Modernizer E2E", () => {
 
       const { pitchLead } = await import("./agents/seller.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
         // Set up a ready lead with all prerequisites
         const lead = db.insertLead("seller-test.com", "test");
@@ -696,7 +729,7 @@ describe("Website Modernizer E2E", () => {
         const site = db.insertSite(lead.id, MOCK_GENERATED_HTML);
         db.updateSite(site.id, { qaPassed: true, previewUrl: "https://preview.example.com" });
 
-        const result = await pitchLead(config, db, lead.id);
+        const result = await pitchLead(config, db, lead.id, bm);
         expect(result.success).toBe(true);
         expect(result.data!.outreach.emailTo).toBe("owner@seller-test.com");
         expect(result.data!.paymentUrl).toBe("https://buy.stripe.com/test_link");
@@ -714,6 +747,7 @@ describe("Website Modernizer E2E", () => {
     it("should reject leads without valid email", async () => {
       const { pitchLead } = await import("./agents/seller.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
         const lead = db.insertLead("no-email.com", "test");
         db.updateLeadStatus(lead.id, "ready");
@@ -721,7 +755,7 @@ describe("Website Modernizer E2E", () => {
         const site = db.insertSite(lead.id, MOCK_GENERATED_HTML);
         db.updateSite(site.id, { qaPassed: true });
 
-        const result = await pitchLead(config, db, lead.id);
+        const result = await pitchLead(config, db, lead.id, bm);
         expect(result.success).toBe(false);
         expect(result.error).toContain("No valid contact email");
       } finally {
@@ -734,6 +768,7 @@ describe("Website Modernizer E2E", () => {
 
       const { pitchLead } = await import("./agents/seller.js");
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
         const lead = db.insertLead("suppressed.com", "test");
         db.updateLead(lead.id, { contactEmail: "blocked@example.com" });
@@ -745,7 +780,7 @@ describe("Website Modernizer E2E", () => {
         // Suppress the email
         db.suppressEmail("blocked@example.com", "unsubscribe");
 
-        const result = await pitchLead(config, db, lead.id);
+        const result = await pitchLead(config, db, lead.id, bm);
         expect(result.success).toBe(false);
         expect(result.error).toContain("suppressed");
       } finally {
@@ -759,6 +794,7 @@ describe("Website Modernizer E2E", () => {
       const { pitchLead } = await import("./agents/seller.js");
       const limitConfig = { ...config, dailyEmailLimit: 0 }; // Set limit to 0
       const db = new ModernizerDb(tmpDir);
+      const bm = createBudgetManager(config.router);
       try {
         const lead = db.insertLead("limited.com", "test");
         db.updateLead(lead.id, { contactEmail: "test@limited.com" });
@@ -767,7 +803,7 @@ describe("Website Modernizer E2E", () => {
         const site = db.insertSite(lead.id, MOCK_GENERATED_HTML);
         db.updateSite(site.id, { qaPassed: true });
 
-        const result = await pitchLead(limitConfig, db, lead.id);
+        const result = await pitchLead(limitConfig, db, lead.id, bm);
         expect(result.success).toBe(false);
         expect(result.error).toContain("Daily email limit");
       } finally {
@@ -799,6 +835,9 @@ describe("Website Modernizer E2E", () => {
         expect(stats.totalRevenue).toBe(0);
         expect(stats.totalCost).toBe(0);
         expect(stats.profitMargin).toBe(0);
+        // Budget state should be present
+        expect(stats.budgetState).toBeDefined();
+        expect(stats.budgetState.throttleLevel).toBe("normal");
       } finally {
         orchestrator.close();
       }
@@ -880,6 +919,9 @@ describe("Website Modernizer E2E", () => {
         expect(Object.keys(stats.leadsByStatus).length).toBeGreaterThan(0);
         expect(stats.totalCost).toBeGreaterThan(0);
         expect(stats.metrics.length).toBeGreaterThan(0);
+
+        // Budget state should reflect accumulated spend
+        expect(stats.budgetState.monthSpendUsd).toBeGreaterThan(0);
 
         // Total cost should be sum of all stages
         const totalFromResults = results.reduce((acc, r) => acc + r.totalCost, 0);
